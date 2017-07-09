@@ -1,0 +1,371 @@
+version: '2'
+
+volumes:
+  sonarqube_conf:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_bundled-plugins:
+  postgresql:
+  postgresql_data:
+  portainer_data:
+  redis_data:
+  gitlab_data:
+  jenkins_data:
+
+networks:
+  prodnet:
+    driver: bridge
+  postgresnet:
+    driver: bridge
+  redisnet:
+    driver: bridge
+
+services:
+ portainer_data:
+   image: busybox
+   container_name: 'portainer_data'
+   volumes:
+     # in order to manage the local docker engine, for now works only in Linux :)
+     - '/var/run/docker.sock:/var/run/docker.sock'
+     - portainer_data:/data
+
+ nexus_data:
+   # same image as for server container: https://github.com/sonatype/docker-nexus/issues/31
+   image:  sonatype/nexus:2.14.4-03
+   container_name: 'nexus_2.14.4_data'
+#   volumes:
+     # in case mounted from host: mkdir /some/dir/nexus-data && chown -R 200 /some/dir/nexus-data
+#     - nexus_data:/sonatype-work
+   command: echo "data-only container for Nexus"
+
+ sonar_data:
+   image: busybox
+   container_name: 'sonar_data'
+   restart: on-failure
+   volumes:
+     - sonarqube_conf:/opt/sonarqube/conf
+     - sonarqube_data:/opt/sonarqube/data
+     - sonarqube_extensions:/opt/sonarqube/extensions
+     - sonarqube_bundled-plugins:/opt/sonarqube/lib/bundled-plugins
+
+ postgres_data:
+   image: busybox
+   container_name: 'postgres_data'
+   restart: on-failure
+   volumes:
+     - postgresql:/var/lib/postgresql
+     # This needs explicit mapping due to https://github.com/docker-library/postgres/blob/4e48e3228a30763913ece952c611e5e9b95c8759/Dockerfile.template#L52
+     - postgresql_data:/var/lib/postgresql/data
+
+ redis_data:
+   image: busybox
+   container_name: 'redis_data'
+   restart: on-failure
+   volumes:
+     - redis_data:/data
+
+ gitlab_data:
+   image: busybox
+   container_name: 'gitlab_data'
+   restart: on-failure
+   volumes:
+     - gitlab_data:/home/git/data
+
+ jenkins_data:
+   image: jenkins:2.60.1
+   container_name: 'jenkins_data'
+   restart: on-failure
+   volumes:
+     - jenkins_data:/var/jenkins_home
+
+####################################################
+
+ redis:
+   # https://hub.docker.com/r/library/redis/
+   image: redis:3.2.9-alpine
+   container_name: 'redis_3.2.9'
+   hostname: 'redis'
+   ports:
+     - "6379:6379"
+   networks:
+     - redisnet
+   volumes_from:
+     - redis_data
+
+ sonar:
+   ####################
+   ##   admin:admin  ##
+   ####################
+   # https://github.com/SonarSource/docker-sonarqube/blob/master/recipes.md
+   image: sonarqube:5.6.6-alpine
+   container_name: 'sonar_5.6.6'
+   hostname: 'sonar'
+#   restart: always
+   ports:
+      - "9000:9000"
+   networks:
+      - postgresnet
+      - prodnet
+   environment:
+      - SONARQUBE_JDBC_URL=jdbc:postgresql://postgresdb:5432/sonar
+      - SONARQUBE_JDBC_USERNAME=db_user
+      - SONARQUBE_JDBC_PASSWORD=db_pass
+   volumes_from:
+      - sonar_data
+   depends_on:
+      - postgresdb
+
+ postgresdb:
+   # https://hub.docker.com/r/sameersbn/postgresql/
+   image: sameersbn/postgresql:9.6-2
+   container_name: 'postgres_9.6.2'
+   hostname: 'postgresdb'
+#   restart: on-failure
+   volumes_from:
+     - postgres_data
+   networks:
+     - postgresnet
+   environment:
+     - DB_USER=db_user
+     - DB_PASS=db_pass
+     - DB_NAME=sonar,gitlab
+     - DB_EXTENSION=pg_trgm
+     - PG_TRUST_LOCALNET=true
+     - PG_PASSWORD=postgres
+
+
+# Will use postgre from same user as gitlab (for now at least)
+# postgresdb:
+#   # https://hub.docker.com/_/postgres/
+#   image: postgres:9.6.3-alpine
+#   container_name: 'postgres_9.6.3'
+#   hostname: 'postgresdb'
+#   restart: on-failure
+#   networks:
+#     - postgresnet
+#   environment:
+#     - POSTGRES_DB=sonar
+#     - POSTGRES_USER=postgres
+#     - POSTGRES_PASSWORD=postgres
+#   volumes_from:
+#     - postgres_data
+
+ nexus:
+   ######################
+   ##  admin:admin123  ##
+   ######################
+   # https://hub.docker.com/r/clearent/nexus - version 2 - show stopper for now cause: https://issues.sonatype.org/browse/NEXUS-10121
+   # https://hub.docker.com/r/sonatype/nexus/
+   image: sonatype/nexus:2.14.4-03
+   container_name: 'nexus_2.14.4'
+   hostname: 'nexus'
+#   restart: always
+   networks:
+     - prodnet
+   volumes_from:
+     - nexus_data
+   environment:
+     - MAX_HEAP=1200m
+     - MIN_HEAP=1200m
+   ports:
+     - "8081:8081"
+
+ portainer:
+   # https://portainer.readthedocs.io/en/stable/deployment.html#persist-portainer-data
+   # https://hub.docker.com/r/portainer/portainer/
+   image: portainer/portainer:1.13.4
+   container_name: 'portainer_1.13.4'
+#   restart: always
+   networks:
+     - prodnet
+   hostname: 'portainer'
+   ports:
+     - "19000:9000"
+   volumes_from:
+     - portainer_data
+
+ gitlab:
+   ######################
+   ##  root:Default1!  ##
+   ######################
+   # https://hub.docker.com/r/sameersbn/gitlab/
+   image: sameersbn/gitlab:9.3.5
+   container_name: 'gitlab_9.3.5'
+#   restart: always
+   networks:
+     - prodnet
+     - redisnet
+     - postgresnet
+   depends_on:
+     - redis
+     - postgresdb
+   hostname: 'gitlab'
+   ports:
+     - "10080:80"
+     - "10022:22"
+   volumes_from:
+     - gitlab_data
+   environment:
+     # https://raw.githubusercontent.com/sameersbn/docker-gitlab/master/docker-compose.yml
+     - DEBUG=true
+
+     - DB_ADAPTER=postgresql
+     - DB_HOST=postgresdb
+     - DB_PORT=5432
+     - DB_USER=db_user
+     - DB_PASS=db_pass
+     - DB_NAME=gitlab
+
+     - REDIS_HOST=redis
+     - REDIS_PORT=6379
+
+     - TZ=Europe/Bucharest
+     - GITLAB_TIMEZONE=Bucharest
+
+     - GITLAB_HTTPS=false
+     - SSL_SELF_SIGNED=false
+
+     - GITLAB_HOST=localhost
+     - GITLAB_PORT=10080
+     - GITLAB_SSH_PORT=10022
+     - GITLAB_RELATIVE_URL_ROOT=
+     - GITLAB_SECRETS_DB_KEY_BASE=n7T3wkf7qsWNRxVbRWKNnVVnXXmpdHRCTKn7rmqz34fHTvwvqMjnqvbspqjPrcRm
+     - GITLAB_SECRETS_SECRET_KEY_BASE=nvWjJhpvrgbwjTVTXpcsnFP9szXNxgsvjVfFFrvshRCjn99KLKTmXCcTzpV9cwtX
+     - GITLAB_SECRETS_OTP_KEY_BASE=ng9JVVFLNmNcPmCd9bcdpdhkjtCw3rfCkrbrKdg9H9rrT7CmRvwJrdsgkh47FMs4
+
+     - GITLAB_ROOT_PASSWORD=Default1!
+#     - GITLAB_ROOT_EMAIL=
+
+#     - GITLAB_NOTIFY_ON_BROKEN_BUILDS=true
+#     - GITLAB_NOTIFY_PUSHER=false
+
+#     - GITLAB_EMAIL=notifications@example.com
+#     - GITLAB_EMAIL_REPLY_TO=noreply@example.com
+#     - GITLAB_INCOMING_EMAIL_ADDRESS=reply@example.com
+
+#     - GITLAB_BACKUP_SCHEDULE=daily
+#     - GITLAB_BACKUP_TIME=01:00
+
+     - SMTP_ENABLED=false
+#     - SMTP_DOMAIN=www.example.com
+#     - SMTP_HOST=smtp.gmail.com
+#     - SMTP_PORT=587
+#     - SMTP_USER=mailer@example.com
+#     - SMTP_PASS=password
+#     - SMTP_STARTTLS=true
+#     - SMTP_AUTHENTICATION=login
+
+     - IMAP_ENABLED=false
+#     - IMAP_HOST=imap.gmail.com
+#     - IMAP_PORT=993
+#     - IMAP_USER=mailer@example.com
+#     - IMAP_PASS=password
+#     - IMAP_SSL=true
+#     - IMAP_STARTTLS=false
+
+     - OAUTH_ENABLED=false
+#     - OAUTH_AUTO_SIGN_IN_WITH_PROVIDER=
+#     - OAUTH_ALLOW_SSO=
+#     - OAUTH_BLOCK_AUTO_CREATED_USERS=true
+#     - OAUTH_AUTO_LINK_LDAP_USER=false
+#     - OAUTH_AUTO_LINK_SAML_USER=false
+#     - OAUTH_EXTERNAL_PROVIDERS=
+
+#     - OAUTH_CAS3_LABEL=cas3
+#     - OAUTH_CAS3_SERVER=
+#     - OAUTH_CAS3_DISABLE_SSL_VERIFICATION=false
+#     - OAUTH_CAS3_LOGIN_URL=/cas/login
+#     - OAUTH_CAS3_VALIDATE_URL=/cas/p3/serviceValidate
+#     - OAUTH_CAS3_LOGOUT_URL=/cas/logout
+
+#     - OAUTH_GOOGLE_API_KEY=
+#     - OAUTH_GOOGLE_APP_SECRET=
+#     - OAUTH_GOOGLE_RESTRICT_DOMAIN=
+
+#     - OAUTH_FACEBOOK_API_KEY=
+#     - OAUTH_FACEBOOK_APP_SECRET=
+
+#     - OAUTH_TWITTER_API_KEY=
+#     - OAUTH_TWITTER_APP_SECRET=
+
+#     - OAUTH_GITHUB_API_KEY=
+#     - OAUTH_GITHUB_APP_SECRET=
+#     - OAUTH_GITHUB_URL=
+#     - OAUTH_GITHUB_VERIFY_SSL=
+
+#     - OAUTH_GITLAB_API_KEY=
+#     - OAUTH_GITLAB_APP_SECRET=
+
+#     - OAUTH_BITBUCKET_API_KEY=
+#     - OAUTH_BITBUCKET_APP_SECRET=
+
+#     - OAUTH_SAML_ASSERTION_CONSUMER_SERVICE_URL=
+#     - OAUTH_SAML_IDP_CERT_FINGERPRINT=
+#     - OAUTH_SAML_IDP_SSO_TARGET_URL=
+#     - OAUTH_SAML_ISSUER=
+#     - OAUTH_SAML_LABEL="Our SAML Provider"
+#     - OAUTH_SAML_NAME_IDENTIFIER_FORMAT=urn:oasis:names:tc:SAML:2.0:nameid-format:transient
+#     - OAUTH_SAML_GROUPS_ATTRIBUTE=
+#     - OAUTH_SAML_EXTERNAL_GROUPS=
+#     - OAUTH_SAML_ATTRIBUTE_STATEMENTS_EMAIL=
+#     - OAUTH_SAML_ATTRIBUTE_STATEMENTS_NAME=
+#     - OAUTH_SAML_ATTRIBUTE_STATEMENTS_FIRST_NAME=
+#     - OAUTH_SAML_ATTRIBUTE_STATEMENTS_LAST_NAME=
+
+#     - OAUTH_CROWD_SERVER_URL=
+#     - OAUTH_CROWD_APP_NAME=
+#     - OAUTH_CROWD_APP_PASSWORD=
+
+#     - OAUTH_AUTH0_CLIENT_ID=
+#     - OAUTH_AUTH0_CLIENT_SECRET=
+#     - OAUTH_AUTH0_DOMAIN=
+
+#     - OAUTH_AZURE_API_KEY=
+#     - OAUTH_AZURE_API_SECRET=
+#     - OAUTH_AZURE_TENANT_ID= 
+
+ jenkins:
+   # TODO: Consider adding a custom folder for Jenkins/Gitlab further configuration
+   # https://hub.docker.com/r/library/jenkins/
+   image: jenkins:2.60.1
+   container_name: 'jenkins_2.60.1'
+   hostname: 'jenkins'
+   restart: always
+   ports:
+     - "18080:8080"
+     - "50000:50000" # slave specific
+   volumes_from:
+     - jenkins_data
+   networks:
+     - prodnet
+   depends_on:
+     - gitlab
+     - nexus
+     - sonar
+#   environment:
+#     - JAVA_OPTS=
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
